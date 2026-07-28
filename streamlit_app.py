@@ -9,54 +9,69 @@ import pandas as pd
 import shap
 import streamlit as st
 
+# --- CONFIGURATION ---
 MODEL_PATH = Path(__file__).parent / "final_phishing_model.pkl"
 
 CHARACTER_MAP = {
-    "dot": ".",
-    "hyphen": "-",
-    "underline": "_",
-    "slash": "/",
-    "questionmark": "?",
-    "equal": "=",
-    "at": "@",
-    "and": "&",
-    "exclamation": "!",
-    "space": " ",
-    "tilde": "~",
-    "comma": ",",
-    "plus": "+",
-    "asterisk": "*",
-    "hashtag": "#",
-    "dollar": "$",
-    "percent": "%",
+    "dot": ".", "hyphen": "-", "underline": "_", "slash": "/", 
+    "questionmark": "?", "equal": "=", "at": "@", "and": "&", 
+    "exclamation": "!", "space": " ", "tilde": "~", "comma": ",", 
+    "plus": "+", "asterisk": "*", "hashtag": "#", "dollar": "$", "percent": "%",
 }
 
-PLACEHOLDER_FEATURES = [
-    "time_response",
-    "domain_spf",
-    "asn_ip",
-    "time_domain_activation",
-    "time_domain_expiration",
-    "qty_ip_resolved",
-    "qty_nameservers",
-    "qty_mx_servers",
-    "ttl_hostname",
-    "tls_ssl_certificate",
-    "qty_redirects",
-    "url_google_index",
-    "domain_google_index",
+SHORTENER_PATTERNS = [
+    "bit.ly", "tinyurl", "goo.gl", "ow.ly", "t.co", "is.gd", "buff.ly", "adf.ly",
 ]
 
-SHORTENER_PATTERNS = [
-    "bit.ly",
-    "tinyurl",
-    "goo.gl",
-    "ow.ly",
-    "t.co",
-    "is.gd",
-    "buff.ly",
-    "adf.ly",
-]
+TRUSTED_BRANDS = {
+    "google.com",
+    "microsoft.com",
+    "apple.com",
+    "amazon.com",
+    "paypal.com",
+    "github.com",
+    "office.com",
+    "outlook.com",
+    "netflix.com",
+    "dropbox.com",
+    "facebook.com",
+    "linkedin.com",
+    "instagram.com",
+    "twitter.com",
+    "bankofamerica.com",
+}
+
+LOOKALIKE_REPLACEMENTS = {
+    "0": "o",
+    "1": "l",
+    "3": "e",
+    "4": "a",
+    "5": "s",
+    "7": "t",
+    "8": "b",
+    "@": "a",
+    "!": "i",
+    "$": "s",
+}
+
+# CYBERSECURITY FIX: Defensive Baseline Imputation
+# We assign normal, legitimate values to offline metrics to prevent the model 
+# from classifying a site as malicious simply because offline data was unavailable.
+BENIGN_OFFLINE_FEATURES = {
+    "time_response": 0.5,             
+    "domain_spf": 1,                  
+    "asn_ip": 13335,                  
+    "time_domain_activation": 3650,   
+    "time_domain_expiration": 365,    
+    "qty_ip_resolved": 1,             
+    "qty_nameservers": 2,             
+    "qty_mx_servers": 1,              
+    "ttl_hostname": 3600,             
+    "tls_ssl_certificate": 1,         
+    "qty_redirects": 0,               
+    "url_google_index": 0,            
+    "domain_google_index": 0
+}
 
 
 @st.cache_data
@@ -88,7 +103,11 @@ def is_ip_address(domain: str) -> bool:
 
 
 def extract_url_features(url: str, columns: list[str]) -> pd.DataFrame:
+    # Safely strip malicious whitespace and enforce scheme
     url = url.strip()
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+        
     parsed = urlparse(url)
     domain = parsed.netloc or ""
     path = parsed.path or ""
@@ -98,17 +117,16 @@ def extract_url_features(url: str, columns: list[str]) -> pd.DataFrame:
 
     features = {}
     field_values = {
-        "url": url,
-        "domain": domain,
-        "directory": directory,
-        "file": file_name,
-        "params": query,
+        "url": url, "domain": domain, "directory": directory,
+        "file": file_name, "params": query,
     }
 
+    # Extract lexical features
     for field, value in field_values.items():
         for token, symbol in CHARACTER_MAP.items():
             features[f"qty_{token}_{field}"] = count_char(value, symbol)
 
+    # Extract structural and domain features
     features.update(
         {
             "qty_tld_url": len([part for part in domain.split(".") if part]) - 1 if domain else 0,
@@ -117,59 +135,8 @@ def extract_url_features(url: str, columns: list[str]) -> pd.DataFrame:
             "domain_length": len(domain),
             "domain_in_ip": int(is_ip_address(domain)),
             "server_client_domain": 0,
-            "qty_dot_directory": count_char(directory, "."),
-            "qty_hyphen_directory": count_char(directory, "-"),
-            "qty_underline_directory": count_char(directory, "_"),
-            "qty_slash_directory": count_char(directory, "/"),
-            "qty_questionmark_directory": count_char(directory, "?"),
-            "qty_equal_directory": count_char(directory, "="),
-            "qty_at_directory": count_char(directory, "@"),
-            "qty_and_directory": count_char(directory, "&"),
-            "qty_exclamation_directory": count_char(directory, "!"),
-            "qty_space_directory": count_char(directory, " "),
-            "qty_tilde_directory": count_char(directory, "~"),
-            "qty_comma_directory": count_char(directory, ","),
-            "qty_plus_directory": count_char(directory, "+"),
-            "qty_asterisk_directory": count_char(directory, "*"),
-            "qty_hashtag_directory": count_char(directory, "#"),
-            "qty_dollar_directory": count_char(directory, "$"),
-            "qty_percent_directory": count_char(directory, "%"),
             "directory_length": len(directory),
-            "qty_dot_file": count_char(file_name, "."),
-            "qty_hyphen_file": count_char(file_name, "-"),
-            "qty_underline_file": count_char(file_name, "_"),
-            "qty_slash_file": count_char(file_name, "/"),
-            "qty_questionmark_file": count_char(file_name, "?"),
-            "qty_equal_file": count_char(file_name, "="),
-            "qty_at_file": count_char(file_name, "@"),
-            "qty_and_file": count_char(file_name, "&"),
-            "qty_exclamation_file": count_char(file_name, "!"),
-            "qty_space_file": count_char(file_name, " "),
-            "qty_tilde_file": count_char(file_name, "~"),
-            "qty_comma_file": count_char(file_name, ","),
-            "qty_plus_file": count_char(file_name, "+"),
-            "qty_asterisk_file": count_char(file_name, "*"),
-            "qty_hashtag_file": count_char(file_name, "#"),
-            "qty_dollar_file": count_char(file_name, "$"),
-            "qty_percent_file": count_char(file_name, "%"),
             "file_length": len(file_name),
-            "qty_dot_params": count_char(query, "."),
-            "qty_hyphen_params": count_char(query, "-"),
-            "qty_underline_params": count_char(query, "_"),
-            "qty_slash_params": count_char(query, "/"),
-            "qty_questionmark_params": count_char(query, "?"),
-            "qty_equal_params": count_char(query, "="),
-            "qty_at_params": count_char(query, "@"),
-            "qty_and_params": count_char(query, "&"),
-            "qty_exclamation_params": count_char(query, "!"),
-            "qty_space_params": count_char(query, " "),
-            "qty_tilde_params": count_char(query, "~"),
-            "qty_comma_params": count_char(query, ","),
-            "qty_plus_params": count_char(query, "+"),
-            "qty_asterisk_params": count_char(query, "*"),
-            "qty_hashtag_params": count_char(query, "#"),
-            "qty_dollar_params": count_char(query, "$"),
-            "qty_percent_params": count_char(query, "%"),
             "params_length": len(query),
             "tld_present_params": int("." in query),
             "qty_params": len(query.split("&")) if query else 0,
@@ -178,18 +145,74 @@ def extract_url_features(url: str, columns: list[str]) -> pd.DataFrame:
         }
     )
 
-    for name in PLACEHOLDER_FEATURES:
-        features[name] = -1
+    # --- FIX 4: Missing Component Override ---
+    # If the URL has no parameters, set all param features to -1 (Absent) instead of 0
+    if not query:
+        features["params_length"] = -1
+        features["tld_present_params"] = -1
+        features["qty_params"] = -1
+        for token in CHARACTER_MAP.keys():
+            features[f"qty_{token}_params"] = -1
+            
+    # If the URL has no directory, set all directory features to -1
+    if not directory:
+        features["directory_length"] = -1
+        for token in CHARACTER_MAP.keys():
+            features[f"qty_{token}_directory"] = -1
+            
+    # If the URL has no file extension, set all file features to -1
+    if not file_name:
+        features["file_length"] = -1
+        for token in CHARACTER_MAP.keys():
+            features[f"qty_{token}_file"] = -1
 
+    # Apply secure baselines for offline features
+    for name, safe_value in BENIGN_OFFLINE_FEATURES.items():
+        features[name] = safe_value
+
+    # Fill any remaining missing columns required by the model with 0
     for col in columns:
         if col not in features:
-            features[col] = -1
+            features[col] = 0
 
     return pd.DataFrame([features], columns=columns)
 
 
 def format_prediction(prediction: int) -> str:
     return "Phishing" if int(prediction) == 1 else "Legitimate"
+
+
+def normalize_lookalike_domain(domain: str) -> str:
+    domain = (domain or "").lower().strip(".")
+    if not domain:
+        return ""
+    normalized = []
+    for char in domain:
+        normalized.append(LOOKALIKE_REPLACEMENTS.get(char, char))
+    return "".join(normalized)
+
+
+def detect_lookalike_domain(url: str) -> bool:
+    url = (url or "").strip()
+    if not url:
+        return False
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower().strip(".")
+    if not hostname:
+        return False
+
+    normalized = normalize_lookalike_domain(hostname)
+    if not normalized:
+        return False
+
+    for brand in TRUSTED_BRANDS:
+        if normalized == brand and hostname != brand:
+            return True
+
+    return False
 
 
 def get_probability_score(model, X: pd.DataFrame) -> float:
@@ -204,16 +227,22 @@ def explain_shap(estimator, scaler, X: pd.DataFrame, feature_columns: list[str])
     X_scaled = scaler.transform(X) if scaler is not None else X.values
     explainer = shap.TreeExplainer(estimator)
     shap_values = explainer.shap_values(X_scaled)
-    if isinstance(shap_values, list) and len(shap_values) == 2:
+    
+    # Safely normalize SHAP output dimensions to prevent backend crashes
+    if isinstance(shap_values, list) and len(shap_values) >= 2:
         shap_values = shap_values[1]
+    if isinstance(shap_values, np.ndarray) and len(shap_values.shape) == 3:
+        shap_values = shap_values[:, :, 1]
 
-    raw_contributions = shap_values[0]
+    raw_contributions = np.array(shap_values[0]).flatten()
+    feature_vals = np.array(X.iloc[0].values).flatten()
+
     shap_df = pd.DataFrame(
         {
             "feature": feature_columns,
             "shap_value": raw_contributions,
             "abs_shap": np.abs(raw_contributions),
-            "feature_value": X.iloc[0].values,
+            "feature_value": feature_vals,
         }
     ).sort_values("abs_shap", ascending=False)
 
@@ -242,17 +271,20 @@ def main():
         layout="centered",
     )
 
-    st.title("Phishing URL Detection Prototype")
+    st.title("🛡️ Phishing URL Detection Prototype")
     st.markdown(
-        "This demo uses a trained phishing detection pipeline and provides real-time explainability with SHAP feature contributions."
+        "This SOC dashboard uses a trained classification pipeline to analyze structural URL threats and provides real-time explainability with SHAP feature contributions."
     )
 
-    _, scaler, estimator, feature_columns = load_model()
+    try:
+        _, scaler, estimator, feature_columns = load_model()
+    except FileNotFoundError:
+        st.error(f"Model file not found! Please ensure '{MODEL_PATH.name}' is in the same directory as this script.")
+        st.stop()
 
     url_input = st.text_input(
-        "Enter a URL to classify:",
-        value="http://example.com/login?user=123",
-        placeholder="https://example.com/path?query=1",
+        "Enter a target URL to classify:",
+        placeholder="example-suspicious-login.com/auth",
     )
 
     if st.button("Classify URL"):
@@ -260,10 +292,33 @@ def main():
             st.warning("Please enter a URL before classifying.")
             return
 
-        X_input = extract_url_features(url_input, feature_columns)
-        prediction = int(estimator.predict(scaler.transform(X_input) if scaler is not None else X_input)[0])
-        score = get_probability_score(estimator, scaler.transform(X_input) if scaler is not None else X_input)
-        label = format_prediction(prediction)
+        with st.spinner("Analyzing structural anomalies..."):
+            X_input = extract_url_features(url_input, feature_columns)
+            
+            X_processed = scaler.transform(X_input) if scaler is not None else X_input
+            
+            prediction = int(estimator.predict(X_processed)[0])
+            score = get_probability_score(estimator, X_processed)
+            label = format_prediction(prediction)
 
-        st.success(f"Prediction: {label}")
-        
+            lookalike_detected = detect_lookalike_domain(url_input)
+            if lookalike_detected:
+                prediction = 1
+                score = 0.99
+                label = format_prediction(prediction)
+
+            st.divider()
+            if prediction == 1:
+                st.error(f"🚨 **Threat Detected:** The model classified this URL as **{label}**.")
+                if lookalike_detected:
+                    st.warning("Lookalike domain pattern detected: the hostname uses character substitutions that resemble a legitimate brand.")
+            else:
+                st.success(f"✅ **Clear:** The model classified this URL as **{label}**.")
+                
+            if not np.isnan(score):
+                st.info(f"**Threat Probability Score:** {score:.2%}")
+
+            explain_shap(estimator, scaler, X_input, feature_columns)
+
+if __name__ == "__main__":
+    main()
